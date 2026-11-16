@@ -1,7 +1,17 @@
 import json
 import os
 import re
-import resource
+import sys
+
+import pytest
+
+
+if sys.platform == "win32":
+    # The login window speaks to the browser over inherited file descriptors 3 and 4 (posix_spawn): it is POSIX
+    # only, and on Windows the login offers --from firefox and --paste instead.
+    pytest.skip("The login window is POSIX only.", allow_module_level=True)
+
+import resource  # noqa: E402
 import shutil
 import signal
 import subprocess

@@ -320,10 +320,12 @@ def test_login_without_a_way_and_without_a_terminal_lists_the_choices(monkeypatc
     asked = log_in(monkeypatch)
 
     result = run("auth", "login")
+    # Styled where colour is forced (CI), and wrapped in a box: compare the words only.
+    words = " ".join(click.unstyle(result.output).replace("│", " ").split())
 
     assert result.exit_code == 2
-    assert "--from firefox" in result.output
-    assert "--window" in result.output
+    assert "--from firefox" in words
+    assert "--window" in words
     assert asked == []
 
 
