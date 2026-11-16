@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -163,7 +164,7 @@ def test_a_terminal_answer_is_read_from_the_terminal_not_stdin(monkeypatch: pyte
     monkeypatch.setattr("sys.stdin", None)
 
     assert REAL_TERMINAL("Rebuild.", "acme", always=True) == answer
-    assert opened == ["/dev/tty"]
+    assert opened == (["CONIN$", "CONOUT$"] if sys.platform == "win32" else ["/dev/tty"])
     assert "[N]o" in terminal.shown
 
 

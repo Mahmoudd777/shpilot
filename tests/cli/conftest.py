@@ -1,4 +1,5 @@
 import subprocess
+import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -123,3 +124,34 @@ def checkout() -> Callable[..., None]:
             _git("remote", "add", name, url)
 
     return checkout
+
+
+# On native Windows shpilot does not hand over to `ssh` (it prints the command to run, exit 14), so the commands
+# built on that handover, and the tests of POSIX file modes, are not run there. What Windows does instead is tested
+# by the tests that name it.
+_POSIX_ONLY_FILES = {"test_ssh.py", "test_backups_pull.py"}
+_POSIX_ONLY_TESTS = {
+    "test_the_file_is_private_whatever_the_umask",
+    "test_writes_the_latest_backup_to_a_file_only_its_owner_reads",
+    "test_a_directory_you_cannot_write_to_is_refused_before_any_change",
+    "test_the_file_is_private_to_the_user",
+    "test_login_writes_a_private_file_per_user_and_never_prints_the_session",
+    "test_a_session_file_is_private_even_over_an_existing_one",
+    "test_an_existing_out_directory_keeps_its_mode",
+    "test_ssh_builds_a_client_that_writes_only_to_allow_the_address",
+}
+_POSIX_ONLY_PARAMS = {"backups pull", "ssh", "web-session login", "web-session logout"}
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    if sys.platform != "win32":
+        return
+    skip = pytest.mark.skip(reason="POSIX only: native Windows prints the ssh command instead, and has no file modes.")
+    for item in items:
+        name = item.name.split("[", 1)[0]
+        param = item.name[len(name) + 1 : -1] if "[" in item.name else ""
+        windows_test = "windows" in name
+        if (item.path.name in _POSIX_ONLY_FILES and not windows_test) or name in _POSIX_ONLY_TESTS or (
+            name == "test_only_the_writers_build_a_client_that_writes" and param in _POSIX_ONLY_PARAMS
+        ):
+            item.add_marker(skip)

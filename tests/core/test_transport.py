@@ -724,7 +724,7 @@ def test_tells_a_session_from_what_would_be_more_than_a_cookie_value(value, send
 
 def test_the_session_is_exposed_only_where_it_is_sent_or_stored():
     exposing = sorted(
-        str(path.relative_to(SOURCES))
+        path.relative_to(SOURCES).as_posix()
         for path in SOURCES.rglob("*.py")
         if "expose_secret(" in path.read_text(encoding="utf-8")
     )

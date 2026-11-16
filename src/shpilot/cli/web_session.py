@@ -195,10 +195,15 @@ def login(
 
 def _write_private(path: Path, data: dict[str, object]) -> None:
     """Write a file only the user can read, never through a link, whatever was there before."""
+    if path.is_symlink():
+        # Also checked where the system has no O_NOFOLLOW (Windows).
+        msg = f"{path} is a link: refusing to write a session through it."
+        raise OSError(msg)
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as file:
-        os.fchmod(file.fileno(), 0o600)
+        if hasattr(os, "fchmod"):
+            os.fchmod(file.fileno(), 0o600)
         file.write(json.dumps(data))
 
 

@@ -244,6 +244,7 @@ They sit in front of the guard and do not replace it.
 | Log in `--window` | yes | yes | no: use `--from firefox` or `--paste` |
 | Session kept in | Secret Service (GNOME Keyring, KWallet) | Keychain | Credential Locker |
 | `shpilot ssh`, `backups pull` | hands over to `ssh` | hands over to `ssh` | prints the `ssh` command to run (exit 14) |
+| `web-session`, `browse.sh` (browser tests) | yes | yes | in WSL (they need the `ssh` handover) |
 | `setup.sh`, `browse.sh` | bash | bash | Git Bash (the shell Claude Code uses on Windows), or WSL |
 
 Every push runs the whole test suite, `setup.sh` and a smoke test of the installed command on Linux,
