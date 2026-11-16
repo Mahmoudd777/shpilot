@@ -149,7 +149,7 @@ class Upstream:
 
     @staticmethod
     def load(name):
-        return json.loads((FIXTURES / name).read_text())
+        return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
     def connect(self, session, **options):
         options.setdefault("sleep", lambda _: None)

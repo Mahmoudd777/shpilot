@@ -38,10 +38,10 @@ PROJECT = "acme-shop"
 PROJECTS = "/app/projects"
 BUILDS = "/app/branch/51044/builds"
 SOCKET = "/websocket"
-EVENTS = json.loads((FIXTURES / "build_events.json").read_text())
+EVENTS = json.loads((FIXTURES / "build_events.json").read_text(encoding="utf-8"))
 # The build as its last event has it: dropped, once a newer build replaced it.
 DROPPED = EVENTS[3][0]
-UNAUTHENTICATED = json.loads((FIXTURES / "unauthenticated.json").read_text())
+UNAUTHENTICATED = json.loads((FIXTURES / "unauthenticated.json").read_text(encoding="utf-8"))
 DROP = object()
 
 

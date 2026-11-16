@@ -27,7 +27,7 @@ OPERATION = "projects"
 PATH = "/app/projects"
 FIXTURES = Path(__file__).parent / "fixtures"
 SOURCES = Path(__file__).parents[2] / "src" / "shpilot"
-UNAUTHENTICATED = json.loads((FIXTURES / "unauthenticated.json").read_text())
+UNAUTHENTICATED = json.loads((FIXTURES / "unauthenticated.json").read_text(encoding="utf-8"))
 LOGIN = "/web/login?redirect=%2Fproject%3F"
 LOGOUT = "/web/session/logout"
 WORKER = "https://eupd00.odoo.com"
@@ -96,7 +96,7 @@ def test_sends_the_json_rpc_request_with_the_session(connect):
     assert request.headers["Content-Type"] == "application/json"
     assert request.headers["Cookie"] == f"session_id={SESSION}"
     assert request.headers["User-Agent"] == f"shpilot/{__version__}"
-    assert answer == json.loads((FIXTURES / "projects.json").read_text())
+    assert answer == json.loads((FIXTURES / "projects.json").read_text(encoding="utf-8"))
 
 
 def test_returns_an_answer_that_has_no_result(connect):
