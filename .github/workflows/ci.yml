@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: uv sync --locked
+      - name: Test suite
+        run: uv run pytest
+
+  install:
+    name: Install and smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - name: setup.sh, as a user runs it
+        run: skills/shpilot/scripts/setup.sh
+      - name: The command works
+        run: |
+          export PATH="$(uv tool dir --bin):$PATH"
+          shpilot --version
+          shpilot auth browsers
+          shpilot guard show
+          shpilot web-session --help
+      - name: Without a session, it says so (exit 3), and never hangs
+        run: |
+          export PATH="$(uv tool dir --bin):$PATH"
+          set +e
+          shpilot projects list </dev/null
+          code=$?
+          echo "exit $code"
+          test "$code" = 3 -o "$code" = 11
+      - name: An agent's login, with no terminal, lists the choices (exit 2)
+        run: |
+          export PATH="$(uv tool dir --bin):$PATH"
+          set +e
+          shpilot auth login </dev/null
+          test $? = 2
+      - name: Claude Code permission rules merge into settings.json
+        run: |
+          skills/shpilot/scripts/setup.sh --claude-permissions
+          grep -q 'Bash(shpilot ssh \*)' ~/.claude/settings.json

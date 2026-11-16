@@ -1,0 +1,52 @@
+[project]
+name = "shpilot"
+version = "0.1.0"
+description = "Odoo.sh from the terminal and from AI coding agents: builds, logs, backups, SSH, with a production guard. Based on odouche."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "LICENSE.odouche"]
+requires-python = ">=3.12"
+authors = [{ name = "Mahmoud Shrief, Global Solutions" }]
+keywords = ["odoo", "odoo.sh", "claude-code", "cli", "devops"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+# Exact pins: this tool holds a session that reaches production projects, so what it runs is fixed
+# by the commit you install, not by whatever was published to PyPI that day.
+dependencies = [
+    "cryptography==50.0.2",
+    "httpx2[ws]==2.13.1",
+    "keyring==25.7.0",
+    "rich==15.0.0",
+    "typer==0.27.3",
+    "wsproto==1.3.2",
+]
+
+[project.scripts]
+shpilot = "shpilot.cli.app:main"
+
+[project.urls]
+Homepage = "https://github.com/Mahmoudd777/shpilot"
+Issues = "https://github.com/Mahmoudd777/shpilot/issues"
+Upstream = "https://github.com/avanserv/odouche"
+
+[dependency-groups]
+dev = ["click==8.5.0", "pytest==9.1.1"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/shpilot"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -p no:randomly --import-mode=importlib"

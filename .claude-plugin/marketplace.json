@@ -1,0 +1,12 @@
+{
+  "name": "shpilot",
+  "owner": { "name": "Mahmoud Shrief, Global Solutions" },
+  "description": "shpilot: Odoo.sh for Claude Code.",
+  "plugins": [
+    {
+      "name": "shpilot",
+      "source": "./",
+      "description": "Odoo.sh builds, live logs, backups and SSH from Claude Code, with a production guard."
+    }
+  ]
+}

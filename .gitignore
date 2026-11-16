@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# uv / virtual environments
+.venv/
+
+# Test and build output
+.pytest_cache/
+dist/
+build/
+
+# Web sessions made by `shpilot web-session` (they hold a live session id)
+*.session

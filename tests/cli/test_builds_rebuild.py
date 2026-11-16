@@ -1,0 +1,775 @@
+import ipaddress
+import json
+import re
+import shutil
+import subprocess
+import sys
+from collections.abc import Iterator
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from typing import Any, Self
+
+import click
+import pytest
+import typer
+from typer.testing import CliRunner, Result
+
+import shpilot
+from shpilot import Branch, Build, BuildResult, BuildStatus, Commit, Log, LogKind, LogLine, Stage
+from shpilot.cli import _terminal, _time, backups, builds, ssh, web_session
+from shpilot.cli._context import BRANCH_ENV, PROJECT_ENV
+from shpilot.cli.app import app
+
+
+NOW = datetime(2026, 3, 10, 12, 0, tzinfo=UTC)
+ACME = shpilot.Project(id=1, name="acme", repository="acme/odoo", url="https://www.odoo.sh/project/acme")
+MAIN = Branch(id=1, name="main", stage=Stage.PRODUCTION, stage_name="production")
+FEATURE = Branch(id=4, name="feature-x", stage=Stage.DEVELOPMENT, stage_name="dev")
+SESSION = shpilot.SessionInfo(shpilot.SessionSource.KEYRING, NOW - timedelta(days=3), NOW + timedelta(days=27))
+ESCAPE = "\x1b[2J\x1b]0;owned\x07"
+URL = "https://acme-feature-x-105.dev.odoo.com"
+ON_FEATURE = ("--project", "acme", "--branch", "feature-x")
+REBUILD = ("builds", "rebuild")
+BACKUP = ("backups", "create")
+DOWNLOAD = ("backups", "download")
+PULL = ("backups", "pull")
+OPEN = ("builds", "open")
+SETTINGS = ("branches", "settings", "set")
+PROJECT_SETTINGS = ("projects", "settings", "set")
+MOVE = ("branches", "move")
+MEMBER_ADD = ("projects", "members", "add")
+MEMBER_ROLE = ("projects", "members", "role")
+# The commands that open a client that writes.
+WRITERS = {REBUILD, BACKUP, DOWNLOAD, SETTINGS, PROJECT_SETTINGS, MOVE, MEMBER_ADD, MEMBER_ROLE}
+
+
+def build(number: int, **changes: object) -> Build:
+    made = Build(
+        id=number,
+        name=f"acme-feature-x-{number}",
+        branch_id=FEATURE.id,
+        branch_name=FEATURE.name,
+        commit=Commit(
+            hash="c0ffee1".ljust(40, "a"),
+            message="Add the report\n\nWith its tests.",
+            author="Ann Example",
+            timestamp=NOW - timedelta(hours=1),
+            url="https://github.com/acme/odoo/commit/c0ffee1",
+        ),
+        status=BuildStatus.PROGRESS,
+        status_name="progress",
+        result=None,
+        result_name=None,
+        status_info="Installing: account",
+        started_at=NOW - timedelta(seconds=5),
+        url=f"https://acme-feature-x-{number}.dev.odoo.com",
+    )
+    return replace(made, **changes)  # pyright: ignore[reportArgumentType]
+
+
+def done(made: Build, result: BuildResult = BuildResult.SUCCESS) -> Build:
+    return replace(
+        made, status=BuildStatus.DONE, status_name="done", status_info="done", result=result, result_name=result.value
+    )
+
+
+LATEST = done(build(104), BuildResult.FAILED)
+DAILY = shpilot.Backup(
+    kind=shpilot.BackupKind.DAILY,
+    kind_name="daily",
+    taken_at=datetime(2026, 10, 14, 3, 0, tzinfo=UTC),
+    build_name="acme-main-104",
+    branch_name="main",
+    commit_hash="a" * 40,
+    downloadable=True,
+    size=None,
+)
+STARTED = build(105)
+LOST = shpilot.OutcomeUnknownError(
+    "The rebuild of branch 4 was sent, and its build was not found. Look before trying again."
+)
+
+# The checks themselves, which a fixture replaces.
+IS_TERMINAL = {"stdin": _terminal.stdin_is_terminal, "stderr": _terminal.stderr_is_terminal}
+
+runner = CliRunner()
+
+
+class StubClient:
+    """Stands in for `shpilot.Client`: rebuilds as the library does, and answers what every command reads."""
+
+    on_branch: Branch = FEATURE
+    listed: tuple[shpilot.Backup, ...] = ()
+    latest: Build | None = LATEST
+    changes: tuple[Build, ...] = (STARTED, done(STARTED))
+    """What a watch of the new build goes through."""
+    lost: shpilot.OdoucheError | None = None
+    """What a rebuild raises once it is sent."""
+    error: shpilot.OdoucheError | None = None
+    modes: list[bool]
+    """The `read_only` each client was built with."""
+    calls: list[str]
+
+    def __init__(self, *, read_only: bool = False) -> None:
+        self.modes.append(read_only)
+
+        if self.error is not None:
+            raise self.error
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        pass
+
+    @property
+    def session(self) -> shpilot.SessionInfo:
+        return SESSION
+
+    def identity(self) -> shpilot.Identity:
+        return shpilot.Identity(
+            user_id=7, name="Ada Lovelace", username="ada", email="ada@example.com", session=SESSION
+        )
+
+    def projects(self) -> list[shpilot.Project]:
+        return [ACME]
+
+    # The library's own, over `branches`.
+    branch = shpilot.Client.branch
+
+    def branches(self, project: str) -> list[Branch]:
+        self.calls.append(f"branches {project}")
+        return [self.on_branch]
+
+    def backups(self, project: str) -> list[shpilot.Backup]:
+        return list(self.listed)
+
+    def builds(self, branch: Branch, *, limit: int = 4) -> list[Build]:
+        return [] if self.latest is None else [self.latest][:limit]
+
+    def history(self, branch: Branch, *, limit: int = 20, timeout: float) -> list[shpilot.Tracking]:
+        return []
+
+    def audit_log(self, project: str, *, limit: int = 25, timeout: float) -> Iterator[shpilot.AuditEntry]:
+        return (entry for entry in ())
+
+    def branch_settings(self, branch: Branch) -> shpilot.BranchSettings:
+        return shpilot.BranchSettings(
+            push_behavior=shpilot.PushBehavior.NEW_BUILD,
+            project_defaults=True,
+            module_install=shpilot.ModuleInstall.REPOSITORY,
+            modules=(),
+            tests=shpilot.BuildTests.MODULES,
+            test_tags=None,
+            demo_data=True,
+            ai_agent=shpilot.AiAgent.CLAUDE,
+            odoo_version=None,
+            odoo_revision_id=None,
+            machine="ubuntu-24.04",
+            recommended_machine="ubuntu-24.04",
+            next_machine=None,
+            domains=(),
+            dns_target=None,
+        )
+
+    def latest_build(self, branch: Branch) -> Build | None:
+        self.calls.append(f"latest {branch.name}")
+        return self.latest
+
+    def build_revision(self, project: str, build: Build) -> shpilot.BuildRevision:
+        return shpilot.BuildRevision(build.id, build.name, build.branch_name, build.commit, "19.0", None)
+
+    def project_overview(self, project: str) -> shpilot.ProjectOverview:
+        return shpilot.ProjectOverview(
+            id=1,
+            name=project,
+            repository="acme/odoo",
+            subscription=shpilot.Subscription.VALID,
+            subscription_name="valid",
+            trial_days_left=None,
+            odoo_version="19.0",
+            region="Europe",
+            dedicated=False,
+            production_build=None,
+            access_level="developer",
+            hosting=None,
+            stages=(),
+            # Healthy, so that `shpilot projects check` exits 0.
+            branches=(
+                shpilot.BranchSummary(
+                    MAIN, shpilot.TrackedBuild(103, BuildStatus.DONE, "done", BuildResult.SUCCESS, "success")
+                ),
+            ),
+        )
+
+    def project_settings(self, project: str) -> shpilot.ProjectSettings:
+        return shpilot.ProjectSettings(
+            name=project,
+            odoo_domain_blocked=False,
+            session_lifetime=shpilot.SessionLifetime.AUTO,
+            public=False,
+            commit_statuses_suspended=False,
+            deploy_key_writable=False,
+            submodules=(),
+            hosting=shpilot.ProjectHosting(0, 0, 1, 1),
+            dedicated=False,
+            http_timeout_seconds=900,
+            cron_timeout_seconds=900,
+            module_install=shpilot.ModuleInstall.REPOSITORY,
+            modules=(),
+            tests=shpilot.BuildTests.MODULES,
+            test_tags=None,
+            demo_data=True,
+            ai_agent=shpilot.AiAgent.CLAUDE,
+            ip_allow_list=(),
+        )
+
+    def members(self, project: str) -> list[shpilot.ProjectMember]:
+        return [
+            shpilot.ProjectMember(
+                id=61001,
+                login="octo-dev",
+                name="octo-dev",
+                role=shpilot.MemberRole.ADMIN,
+                github_id=1000001,
+                pending_login=False,
+            )
+        ]
+
+    # The library's own, which asks nothing.
+    check_rebuild = shpilot.Client.check_rebuild
+    check_settings_change = shpilot.Client.check_settings_change
+    check_project_settings_change = shpilot.Client.check_project_settings_change
+    check_backup = shpilot.Client.check_backup
+    check_move = shpilot.Client.check_move
+    check_add_member = staticmethod(shpilot.Client.check_add_member)
+    check_member_role = shpilot.Client.check_member_role
+    ssh_target = shpilot.Client.ssh_target
+    panel_url = shpilot.Client.panel_url
+
+    def allow_ip(self, branch: Branch) -> ipaddress.IPv4Address:
+        self.calls.append(f"allow_ip {branch.name}")
+        return ipaddress.IPv4Address("203.0.113.7")
+
+    def rebuild(self, branch: Branch | int) -> Build:
+        self.calls.append(f"rebuild {branch.name if isinstance(branch, Branch) else branch}")
+
+        if self.lost is not None:
+            raise self.lost
+
+        return STARTED
+
+    def change_branch_settings(
+        self, branch: Branch, change: shpilot.SettingsChange
+    ) -> shpilot.SettingsOutcome[shpilot.BranchSettings]:
+        self.calls.append(f"settings {branch.name}")
+        before = self.branch_settings(branch)
+
+        return shpilot.SettingsOutcome(before, replace(before, **change.given()), ())  # pyright: ignore[reportArgumentType]
+
+    def move_branch(self, branch: Branch, to: Stage) -> Branch:
+        self.calls.append(f"move {branch.name}")
+        return replace(branch, stage=to, stage_name=to.value)
+
+    def add_member(self, project: str, login: str, role: shpilot.MemberRole) -> shpilot.ProjectMember:
+        self.calls.append(f"add {login}")
+        return replace(self.members(project)[0], id=61004, login=login, name=login, role=role, github_id=1000004)
+
+    def change_project_settings(
+        self, project: str, change: shpilot.ProjectSettingsChange
+    ) -> shpilot.SettingsOutcome[shpilot.ProjectSettings]:
+        self.calls.append(f"project settings {project}")
+        before = self.project_settings(project)
+
+        return shpilot.SettingsOutcome(before, replace(before, **change.given()), ())  # pyright: ignore[reportArgumentType]
+
+    def create_backup(self, project: str, branch: Branch, *, comment: str = "") -> shpilot.BackupRequest:
+        self.calls.append(f"backup {branch.name}")
+        return shpilot.BackupRequest(build=STARTED, previous=None)
+
+    def wait_for_backup(
+        self, project: str, request: shpilot.BackupRequest, *, timeout: float
+    ) -> Iterator[shpilot.Backup]:
+        yield shpilot.Backup(
+            kind=shpilot.BackupKind.MANUAL,
+            kind_name="manual",
+            taken_at=NOW,
+            build_name=request.build.name,
+            branch_name=request.build.branch_name,
+            commit_hash=request.build.commit.hash,
+            downloadable=True,
+            size=None,
+        )
+
+    def prepare_download(self, project: str, backup: shpilot.Backup, **_: bool) -> shpilot.PreparedDownload:
+        self.calls.append(f"prepare {backup.build_name}")
+        return shpilot.PreparedDownload(
+            backup=backup,
+            build=STARTED,
+            worker_url="https://eupd00.odoo.com",
+            neutralized=True,
+            filestore=True,
+            link="https://eupd00.odoo.com/paas/build/105/download/dump",
+            previous=0,
+        )
+
+    def find_download(self, project: str, backup: shpilot.Backup, **_: bool) -> shpilot.PreparedDownload | None:
+        return None
+
+    def wait_for_download(self, project: str, prepared: shpilot.PreparedDownload, *, timeout: float) -> Iterator[None]:
+        yield None
+
+    def watch_build(self, project: str, build: Build, *, timeout: float) -> Iterator[Build]:
+        self.calls.append(f"watch {project} {build.id} {timeout:g}")
+        yield from self.changes
+
+    def logs(self, project: str, build: Build) -> list[Log]:
+        return [Log(kind=LogKind.INSTALL, name="install", modified_at=NOW, size="2 KB")]
+
+    def read_log(
+        self, project: str, build: Build, kind: LogKind | str, *, tail: int | None = None
+    ) -> Iterator[LogLine]:
+        yield LogLine(text="Modules loaded.", offset=16, truncated=False)
+
+    def mails(self, project: str, branch: Branch, build: Build, *, limit: int = 20) -> list[shpilot.Mail]:
+        return []
+
+
+@pytest.fixture(autouse=True)
+def read_only_clients() -> None:
+    """Replace the shared check: the command of this file is the one that writes."""
+
+
+@pytest.fixture(autouse=True)
+def client(monkeypatch: pytest.MonkeyPatch) -> type[StubClient]:
+    class Client(StubClient):
+        modes: list[bool] = []
+        calls: list[str] = []
+
+    monkeypatch.setattr(shpilot, "Client", Client)
+    monkeypatch.setattr(_time, "_now", lambda: NOW)
+    # The usual case. A test of a script's run turns one off.
+    monkeypatch.setattr(_terminal, "stdin_is_terminal", lambda: True)
+    monkeypatch.setattr(_terminal, "stderr_is_terminal", lambda: True)
+
+    return Client
+
+
+@pytest.fixture(params=["stdin_is_terminal", "stderr_is_terminal"], ids=["stdin", "stderr"])
+def unattended(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
+    """Make stdin, then stderr, something else than a terminal."""
+    monkeypatch.setattr(_terminal, request.param, lambda: False)
+
+
+def run(*args: str, stdin: str | None = None) -> Result:
+    return runner.invoke(app, list(args), input=stdin)
+
+
+def sent(client: type[StubClient]) -> list[str]:
+    return [call for call in client.calls if call.startswith("rebuild")]
+
+
+def test_a_yes_sends_one_rebuild_and_prints_the_new_build(client: type[StubClient]):
+    result = run(*REBUILD, *ON_FEATURE, stdin="y\n")
+
+    assert result.exit_code == 0
+    assert sent(client) == ["rebuild feature-x"]
+    assert client.calls == ["branches acme", "latest feature-x", "rebuild feature-x"]
+    shown = dict(line.split(maxsplit=1) for line in result.stdout.splitlines() if len(line.split()) > 1)
+    assert shown["ID"] == "105"
+    assert shown["Status"] == "progress"
+    assert shown["Subject"] == "Add the report"
+    assert shown["URL"] == URL
+
+
+@pytest.mark.parametrize("answer", ["Y\n", "yes\n", " YES \n", "y"])
+def test_a_yes_is_y_or_yes_in_any_case(client: type[StubClient], answer: str):
+    result = run(*REBUILD, *ON_FEATURE, stdin=answer)
+
+    assert result.exit_code == 0
+    assert sent(client) == ["rebuild feature-x"]
+
+
+@pytest.mark.parametrize("answer", ["n\n", "\n", "no\n", "yep\n", "1\n", "true\n", ""], ids=repr)
+def test_anything_but_a_yes_sends_nothing_and_exits_1(client: type[StubClient], answer: str):
+    result = run(*REBUILD, *ON_FEATURE, stdin=answer)
+
+    assert result.exit_code == 1
+    assert sent(client) == []
+    assert result.stdout == ""
+    # The line break of the answer is the terminal's to echo.
+    assert result.stderr.endswith("Start a new build of this branch? [y/N]: Nothing was sent.\n")
+
+
+def test_an_interrupt_at_the_question_exits_130_and_sends_nothing(
+    client: type[StubClient], monkeypatch: pytest.MonkeyPatch
+):
+    def interrupted(_: str) -> bool:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(_terminal, "confirmed", interrupted)
+
+    result = run(*REBUILD, *ON_FEATURE)
+
+    assert result.exit_code == 130
+    assert sent(client) == []
+
+
+@pytest.mark.parametrize("name", ["stdin", "stderr"])
+def test_a_closed_stream_is_not_a_terminal(monkeypatch: pytest.MonkeyPatch, name: str):
+    monkeypatch.setattr(sys, name, None)
+
+    assert not IS_TERMINAL[name]()
+
+
+def test_yes_sends_the_rebuild_without_asking(client: type[StubClient]):
+    result = run(*REBUILD, *ON_FEATURE, "--yes")
+
+    assert result.exit_code == 0
+    assert sent(client) == ["rebuild feature-x"]
+    assert "[y/N]" not in result.stderr
+
+
+@pytest.mark.usefixtures("unattended")
+def test_a_run_nobody_attends_is_refused_before_a_client_is_opened(client: type[StubClient]):
+    result = run(*REBUILD, *ON_FEATURE, stdin="y\n")
+
+    assert result.exit_code == 2
+    assert client.modes == []
+    assert sent(client) == []
+    assert result.stdout == ""
+    assert "Stdin or stderr is not a terminal" in click.unstyle(result.stderr)
+    assert "--yes" in click.unstyle(result.stderr)
+
+
+@pytest.mark.usefixtures("unattended")
+def test_a_run_nobody_attends_rebuilds_with_yes(client: type[StubClient]):
+    result = run(*REBUILD, *ON_FEATURE, "-y")
+
+    assert result.exit_code == 0
+    assert sent(client) == ["rebuild feature-x"]
+
+
+@pytest.mark.parametrize("arguments", [(), ("--yes",)])
+def test_what_is_rebuilt_is_said_before_anything_is_sent(client: type[StubClient], arguments: tuple[str, ...]):
+    result = run(*REBUILD, *ON_FEATURE, *arguments, stdin="n\n")
+
+    assert result.stderr.splitlines()[:3] == [
+        "Project: acme",
+        "Branch: feature-x (development)",
+        "Latest build: 104, of commit c0ffee1 Add the report",
+    ]
+
+
+def test_the_question_comes_after_what_is_rebuilt(client: type[StubClient]):
+    result = run(*REBUILD, *ON_FEATURE, stdin="n\n")
+
+    assert result.stderr.splitlines()[3].startswith("Start a new build of this branch? [y/N]:")
+
+
+def test_a_stage_the_library_does_not_know_exits_9_and_sends_nothing(client: type[StubClient]):
+    client.on_branch = replace(FEATURE, stage=Stage.UNKNOWN, stage_name="preview")
+    result = run(*REBUILD, *ON_FEATURE, "--yes")
+
+    assert result.exit_code == 9
+    assert client.calls == ["branches acme"]
+
+
+def test_a_branch_with_no_build_is_rebuilt_too(client: type[StubClient]):
+    client.latest = None
+    result = run(*REBUILD, *ON_FEATURE, "--yes")
+
+    assert result.exit_code == 0
+    assert result.stderr.splitlines()[2] == "Latest build: none"
+    assert sent(client) == ["rebuild feature-x"]
+
+
+def test_an_escape_sequence_in_the_subject_is_not_emitted(client: type[StubClient]):
+    commit = replace(LATEST.commit, message=f"Add{ESCAPE} the report\x9b31m")
+    client.latest = replace(LATEST, commit=commit)
+    result = run(*REBUILD, *ON_FEATURE, stdin="n\n")
+
+    assert not re.search(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]", result.output)
+    assert "Latest build: 104, of commit c0ffee1 Add[2J]0;owned the report31m" in result.stderr
+
+
+def test_watch_sends_one_rebuild_then_watches_the_new_build_and_exits_0(client: type[StubClient]):
+    result = run(*REBUILD, *ON_FEATURE, "--yes", "--watch")
+
+    assert result.exit_code == 0
+    assert client.calls == ["branches acme", "latest feature-x", "rebuild feature-x", "watch acme 105 1800"]
+    assert result.stdout == f"Build 105 succeeded: {URL}\n"
+    assert "Build 105 was started." in result.stderr.splitlines()
+
+
+def test_the_new_build_is_named_on_stderr_before_it_is_shown(client: type[StubClient], monkeypatch: pytest.MonkeyPatch):
+    def fails() -> list[object]:
+        msg = "No columns."
+        raise ValueError(msg)
+
+    monkeypatch.setattr(builds, "_build_columns", fails)
+
+    result = run(*REBUILD, *ON_FEATURE, "--yes")
+
+    assert result.exit_code == 1
+    assert result.stderr.splitlines()[3] == "Build 105 was started."
+
+
+@pytest.mark.parametrize(
+    ("error", "code", "hint"),
+    [
+        (shpilot.UpstreamUnavailableError("Odoo.sh cannot be reached."), 7, "Try again later."),
+        (shpilot.SessionExpiredError("The session has expired."), 3, "Run `shpilot auth login`."),
+    ],
+    ids=["unavailable", "expired"],
+)
+def test_a_watch_that_fails_names_the_build_to_watch_and_does_not_rebuild_again(
+    client: type[StubClient], monkeypatch: pytest.MonkeyPatch, error: shpilot.OdoucheError, code: int, hint: str
+):
+    def failing(*_: object, **__: object) -> Iterator[Build]:
+        yield STARTED
+        raise error
+
+    monkeypatch.setattr(client, "watch_build", failing)
+
+    result = run(*REBUILD, *ON_FEATURE, "--yes", "--watch")
+
+    assert result.exit_code == code
+    assert sent(client) == ["rebuild feature-x"]
+    assert result.stderr.splitlines()[-3:] == [
+        "Build 105 may still be running. Follow it with `shpilot builds watch 105`.",
+        str(error),
+        hint,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("result_of_build", "code"), [(BuildResult.FAILED, 20), (BuildResult.WARNING, 21)], ids=["failed", "warning"]
+)
+def test_watch_exits_with_the_code_of_the_watch(client: type[StubClient], result_of_build: BuildResult, code: int):
+    client.changes = (STARTED, done(STARTED, result_of_build))
+    result = run(*REBUILD, *ON_FEATURE, "--yes", "--watch")
+
+    assert result.exit_code == code
+    assert sent(client) == ["rebuild feature-x"]
+
+
+def test_watch_that_times_out_exits_23_and_does_not_rebuild_again(
+    client: type[StubClient], monkeypatch: pytest.MonkeyPatch
+):
+    def late(*_: object, **__: object) -> Iterator[Build]:
+        yield STARTED
+        msg = "Still running."
+
+        raise shpilot.StreamTimeoutError(msg)
+
+    monkeypatch.setattr(client, "watch_build", late)
+
+    result = run(*REBUILD, *ON_FEATURE, "--yes", "--watch")
+
+    assert result.exit_code == 23
+    assert sent(client) == ["rebuild feature-x"]
+
+
+def test_timeout_is_how_long_the_watch_lasts(client: type[StubClient]):
+    result = run(*REBUILD, *ON_FEATURE, "--yes", "--watch", "--timeout", "60")
+
+    assert result.exit_code == 0
+    assert client.calls[-1] == "watch acme 105 60"
+
+
+def test_timeout_without_watch_is_a_usage_error(client: type[StubClient]):
+    result = run(*REBUILD, *ON_FEATURE, "--yes", "--timeout", "60")
+
+    assert result.exit_code == 2
+    assert "--watch" in click.unstyle(result.stderr)
+    assert client.modes == []
+
+
+def test_json_is_the_new_build(client: type[StubClient]):
+    result = run("--format", "json", *REBUILD, *ON_FEATURE, "--yes")
+
+    assert result.exit_code == 0
+    found = json.loads(result.stdout)
+    assert found["id"] == 105
+    assert found["commit"]["message"] == "Add the report\n\nWith its tests."
+    assert found["url"] == URL
+
+
+def test_json_with_watch_is_one_build_per_change(client: type[StubClient]):
+    client.changes = (STARTED, done(STARTED, BuildResult.FAILED))
+    result = run("--format", "json", *REBUILD, *ON_FEATURE, "--yes", "--watch")
+
+    assert result.exit_code == 20
+    changes = [json.loads(line) for line in result.stdout.splitlines()]
+    assert [(change["id"], change["result"]) for change in changes] == [(105, None), (105, "failed")]
+
+
+def test_an_unknown_outcome_exits_10_names_the_builds_to_check_and_is_not_sent_again(client: type[StubClient]):
+    client.lost = LOST
+    result = run(*REBUILD, *ON_FEATURE, "--yes", "--watch")
+
+    assert result.exit_code == 10
+    assert sent(client) == ["rebuild feature-x"]
+    assert result.stdout == ""
+    assert result.stderr.splitlines()[-2:] == [
+        "The rebuild of branch 4 was sent, and its build was not found. Look before trying again.",
+        "`shpilot builds list` shows whether the build was started.",
+    ]
+    assert not any(call.startswith("watch") for call in client.calls)
+
+
+@pytest.mark.parametrize("arguments", [(), ("--yes",)], ids=["asked", "yes"])
+def test_a_production_branch_exits_9_with_the_message_of_the_library_and_no_question(
+    client: type[StubClient], arguments: tuple[str, ...]
+):
+    client.on_branch = MAIN
+    result = run(*REBUILD, "--project", "acme", "--branch", "main", *arguments, stdin="y\n")
+
+    assert result.exit_code == 9
+    assert client.calls == ["branches acme"]
+    assert result.stdout == ""
+    assert result.stderr == "A branch in the production stage is not rebuilt: only a development or a staging one is.\n"
+
+
+def test_the_client_is_one_that_writes(client: type[StubClient]):
+    run(*REBUILD, *ON_FEATURE, "--yes")
+
+    assert client.modes == [False]
+
+
+def test_logged_out_exits_3_and_names_the_login(client: type[StubClient]):
+    client.error = shpilot.NoSessionError("Not logged in.")
+    result = run(*REBUILD, *ON_FEATURE, "--yes")
+
+    assert result.exit_code == 3
+    assert result.stdout == ""
+    assert "shpilot auth login" in result.stderr
+
+
+def test_a_missing_branch_while_logged_out_is_a_usage_error(client: type[StubClient]):
+    client.error = shpilot.NoSessionError("Not logged in.")
+    result = run(*REBUILD, "--project", "acme", "--yes")
+
+    assert result.exit_code == 2
+    assert BRANCH_ENV in result.stderr
+    assert client.modes == []
+
+
+def test_help_opens_no_client_and_its_first_line_says_it_changes_state(client: type[StubClient]):
+    client.error = shpilot.KeyringUnavailableError()
+    result = run(*REBUILD, "--help")
+
+    assert result.exit_code == 0
+    lines = [line.strip() for line in click.unstyle(result.output).splitlines() if line.strip()]
+    assert lines[1].startswith("Change state on Odoo.sh:")
+    assert client.modes == []
+
+
+def test_the_help_of_the_group_says_it_changes_state(client: type[StubClient]):
+    result = run("builds", "--help")
+    listed = [line for line in click.unstyle(result.output).splitlines() if " rebuild " in line]
+    assert len(listed) == 1
+    assert "Change state on Odoo.sh" in listed[0]
+
+
+def commands(command: Any, path: tuple[str, ...] = ()) -> Iterator[tuple[str, ...]]:
+    """Walk a command's tree down to the commands that run something."""
+    children: dict[str, Any] | None = getattr(command, "commands", None)
+
+    if children is None:
+        yield path
+        return
+
+    for name, child in children.items():
+        yield from commands(child, (*path, name))
+
+
+COMMANDS = sorted(commands(typer.main.get_command(app)))
+# What a command needs to run to its end, when the project and the branch in the environment are not enough.
+ARGUMENTS: dict[tuple[str, ...], tuple[str, ...]] = {
+    REBUILD: ("--yes",),
+    BACKUP: ("--yes",),
+    DOWNLOAD: ("--yes", "--new", "--link"),
+    PULL: ("--output", "daily.sql.gz"),
+    OPEN: ("monitor",),
+    # What a new commit does: a staging branch has no new build options.
+    SETTINGS: ("--yes", "push_behavior=update"),
+    PROJECT_SETTINGS: ("--yes", "public=yes"),
+    MOVE: ("--yes", "--to", "development"),
+    MEMBER_ADD: ("--yes", "octo-cat"),
+    # The role the member already has: nothing is sent.
+    MEMBER_ROLE: ("--yes", "octo-dev", "admin"),
+    ("guard", "allow"): ("acme",),
+    ("auth", "login"): ("--window",),
+    ("web-session", "login"): ("--out", "sessions", "admin"),
+    ("web-session", "logout"): ("--out", "sessions", "--all"),
+    ("guard", "ask"): ("acme",),
+}
+# The commands that build no client.
+# `shpilot guard` reads and writes only its own file.
+CLIENTLESS = {("auth", "logout"), ("auth", "browsers"), ("guard", "allow"), ("guard", "ask"), ("guard", "show")}
+
+
+def test_the_tree_has_the_commands_that_write():
+    assert set(COMMANDS) > WRITERS
+    assert set(COMMANDS) > CLIENTLESS
+
+
+@pytest.mark.parametrize("path", COMMANDS, ids=" ".join)
+def test_only_the_writers_build_a_client_that_writes(
+    client: type[StubClient], monkeypatch: pytest.MonkeyPatch, path: tuple[str, ...]
+):
+    monkeypatch.setenv(PROJECT_ENV, "acme")
+    monkeypatch.setenv(BRANCH_ENV, "feature-x")
+    # Rebuilt and backed up both.
+    client.on_branch = replace(FEATURE, stage=Stage.STAGING, stage_name="staging")
+
+    if path == PULL:
+        # Copied from production alone.
+        client.on_branch = replace(FEATURE, stage=Stage.PRODUCTION, stage_name="production")
+        client.listed = (DAILY,)
+
+    monkeypatch.delenv(shpilot.SESSION_ENV, raising=False)
+    monkeypatch.setattr(shpilot, "login", lambda **_: None)
+    monkeypatch.setattr(ssh, "_exec", lambda *_: None)
+    monkeypatch.setattr(ssh, "_run", lambda command, **_: subprocess.CompletedProcess(command, 0))
+    monkeypatch.setattr(backups, "_umask", lambda _: 0)
+    # The build's shell, as `shpilot web-session` reaches it: a session made, or every tagged one deleted.
+    monkeypatch.setattr(
+        web_session,
+        "_remote",
+        lambda _target, script, _mark: [{"deleted": 1, "left": 0}] if "store.delete" in script
+        else [{"uid": 2, "login": "admin", "db": "acme", "sid": "a" * 40}],
+    )
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/ssh")
+    monkeypatch.setattr(shpilot, "logout", lambda: shpilot.LogoutResult(None, False, False, None))  # noqa: FBT003
+
+    result = run(*path, *ARGUMENTS.get(path, ()))
+
+    # A command that did not run to its end shows nothing: a new one may need a row in `ARGUMENTS`.
+    assert result.exit_code == 0, result.output
+
+    if path in CLIENTLESS:
+        assert client.modes == []
+    else:
+        assert client.modes
+        assert set(client.modes) == {path not in WRITERS}
+
+
+def test_ssh_builds_a_client_that_writes_only_to_allow_the_address(
+    client: type[StubClient], monkeypatch: pytest.MonkeyPatch
+):
+    gets_in = iter([255, 0])
+    monkeypatch.setattr(
+        ssh, "_run", lambda command, **_: subprocess.CompletedProcess(command, next(gets_in), stderr="refused")
+    )
+    monkeypatch.setattr(ssh, "_sleep", lambda _: None)
+    monkeypatch.setattr(ssh, "_exec", lambda *_: None)
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/ssh")
+
+    result = run("ssh", *ON_FEATURE, "--yes")
+
+    assert result.exit_code == 0, result.output
+    assert client.modes == [True, False]
+    assert [call for call in client.calls if not call.startswith(("branches", "latest"))] == ["allow_ip feature-x"]
