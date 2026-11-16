@@ -1,5 +1,8 @@
 # shpilot
 
+[![CI](https://github.com/Mahmoudd777/shpilot/actions/workflows/ci.yml/badge.svg)](https://github.com/Mahmoudd777/shpilot/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Odoo.sh from the terminal, and from AI coding agents such as Claude Code. Wait for a build after a
 push, read its install and server logs, follow a log live, list backups, open SSH on a staging
 build, and click-test a staging build in a headless browser as any of its users. Every change to
