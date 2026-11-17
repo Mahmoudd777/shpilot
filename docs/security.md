@@ -66,9 +66,10 @@ How it reads:
 If Odoo.sh no longer accepts the session that browser holds, nothing is stored and the error says
 to log in again in that browser.
 
-On Windows only Firefox is offered: Chromium there binds its cookie key to the browser itself, so
-nothing outside it can read the cookie. Firefox's profiles are found in the AppData folder Windows
-reports, not through `%APPDATA%`.
+On Windows only Firefox's login is reused: Chromium there binds its cookie key to the browser itself,
+so nothing outside it can read the cookie, and shpilot does not try. Picking Chrome, Edge, Brave,
+Vivaldi or Chromium on Windows opens a fresh sign-in window in that browser instead (below). Firefox's
+profiles are found in the AppData folder Windows reports, not through `%APPDATA%`.
 
 ### A fresh browser window (`--window`)
 
@@ -78,18 +79,23 @@ odouche's design.
 - The browser is a Chromium-family one already on your machine: Chrome, Chromium, Edge, Brave,
   Vivaldi or Opera, including Brave and Chromium installed as Ubuntu snaps. `SHPILOT_BROWSER`
   names one, by name on the `PATH` or by path. shpilot does not download a browser.
+- On Windows the browsers are found in the Program Files and local AppData folders Windows reports,
+  never through `PATH`, and you pick which one: `--from edge` opens the window in Edge.
+  `SHPILOT_BROWSER` is taken there by absolute path only.
 - The window uses a temporary profile that is deleted when the login ends, so you sign in to
   GitHub each time and nothing from that sign-in is kept.
 - shpilot talks to the browser over a pipe, not a debugging port that other programs on the machine
-  could open, and asks it for one thing: the cookies of `www.odoo.sh`. It does not read what the
+  could open (file descriptors 3 and 4 on Linux and macOS; on Windows two pipe handles passed with
+  `--remote-debugging-io-pipes`, the only handles the browser inherits), and asks it for one thing: the cookies of `www.odoo.sh`. It does not read what the
   pages show or the cookies of any other site, GitHub included. Some browsers answer before their
   first window exists, so shpilot asks again for up to 15 seconds.
-- The profile is deleted when the login is interrupted or the program is terminated, too. A program
+- The profile is deleted when the login is interrupted or the program is terminated, too. On Windows
+  the browser and every process it started are ended first (`taskkill /T`, from System32). A program
   that is killed outright cannot delete it. If the profile cannot be deleted, the login fails, the
   session is not kept and the error names the directory to delete.
 
-On Linux with no display, or on Windows, no window can be opened, and shpilot asks for the cookie
-to be pasted instead.
+On Linux with no display, or where no Chromium-family browser is installed, no window can be opened,
+and shpilot asks for the cookie to be pasted instead.
 
 ### Paste the cookie (`--paste`)
 

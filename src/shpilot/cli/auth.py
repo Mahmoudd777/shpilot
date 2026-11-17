@@ -1,6 +1,7 @@
 """`shpilot auth`: log in, log out, and say what session is in use."""
 
 import os
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -68,10 +69,22 @@ class Way:
     signed_in: bool
     """For a browser: whether it holds an Odoo.sh login. Whether Odoo.sh still accepts it is known only when used."""
 
+    opens_window: bool = False
+    """For a browser on Windows other than Firefox: picking it opens a sign-in window in it, with a fresh profile
+    deleted after, since Windows locks the logins Chromium-family browsers hold to the browser itself."""
+
 
 def _ways() -> list[Way]:
     ways = [Way(found.id, found.label, found.signed_in) for found in shpilot.browsers()]
-    ways.append(Way(_WINDOW, "A sign-in window (a fresh profile, deleted after; sign in to GitHub there)", False))
+    if sys.platform == "win32":
+        listed = {way.id for way in ways}
+        ways += [
+            Way(browser_id, label, signed_in=False, opens_window=True)
+            for browser_id, label, _ in shpilot.window_browsers()
+            if browser_id not in listed
+        ]
+    else:
+        ways.append(Way(_WINDOW, "A sign-in window (a fresh profile, deleted after; sign in to GitHub there)", False))
     ways.append(Way(_PASTE, "Paste the session_id cookie from your browser's developer tools", False))
     return ways
 
@@ -79,8 +92,22 @@ def _ways() -> list[Way]:
 def _way_line(way: Way) -> str:
     if way.id in (_WINDOW, _PASTE):
         return f"{way.id:<9} {way.label}"
+    if way.opens_window:
+        return f"{way.id:<9} {way.label}, opens a sign-in window in it (a fresh profile, deleted after)"
     state = "holds an Odoo.sh login: reuse it, no sign-in" if way.signed_in else "holds no Odoo.sh login"
     return f"{way.id:<9} {way.label}, {state}"
+
+
+def _opens_window(ctx: typer.Context, browser_id: str) -> bool:
+    """Whether `--from <browser_id>` opens a sign-in window in that browser: on Windows, for all but Firefox, whose
+    login is reused there as everywhere."""
+    if sys.platform != "win32" or browser_id == "firefox":
+        return False
+    if not any(found == browser_id for found, _, _ in shpilot.window_browsers()):
+        ways = ", ".join(way.id for way in _ways() if way.id not in (_WINDOW, _PASTE)) or "none"
+        msg = f"{browser_id} is not installed here. Browsers here: {ways}. Or use --paste."
+        raise ContextError(msg, ctx=ctx)
+    return True
 
 
 @app.command(epilog="Example: shpilot auth browsers --format json")
@@ -122,7 +149,8 @@ def login(
         typer.Option(
             "--from",
             help="Reuse the Odoo.sh login this browser already holds: firefox, chrome, chromium, brave, edge, "
-            "vivaldi or opera. Only its www.odoo.sh session_id cookie is read.",
+            "vivaldi or opera. Only its www.odoo.sh session_id cookie is read. On Windows, every one but firefox "
+            "opens a sign-in window in that browser instead, with a fresh profile deleted after.",
             show_default=False,
         ),
     ] = None,
@@ -145,6 +173,8 @@ def login(
         shpilot.login(ask=_ask, notify=notify)
     elif chosen == _PASTE:
         shpilot.login(ask=_ask, notify=notify, paste=True)
+    elif _opens_window(ctx, chosen):
+        shpilot.login(ask=_ask, notify=notify, window=chosen)
     else:
         shpilot.login(notify=notify, use=chosen)
     typer.echo("The session is stored in the keyring.", err=True)

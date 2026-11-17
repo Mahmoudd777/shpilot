@@ -1,22 +1,28 @@
 """The browser a login runs in, and the one thing read from it: the Odoo.sh session cookie.
 
-This is the only code that speaks to the browser. It sends four methods and nothing else:
+This is the only code that speaks to the browser, over a pipe only this process holds: inherited file descriptors 3
+and 4 on Linux and macOS, two inherited pipe handles on Windows (`--remote-debugging-io-pipes`), never a network
+port. It sends four methods and nothing else:
 `Target.getTargets` (again, for up to 15 s, until the window exists), `Target.attachToTarget`, `Network.getCookies` for `HOST` and
 `Browser.close`. It enables no domain, subscribes to no event and injects no script.
 """
 
 import json
 import os
+import queue
 import selectors
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Mapping
 from contextlib import suppress
 from typing import Any, Self, cast
 
+from shpilot import winpaths
 from shpilot._upstream.transport import HOST
 from shpilot.errors import LoginError
 from shpilot.secret import Secret
@@ -44,7 +50,8 @@ _APPLICATIONS = (
 _REPLY_TIMEOUT = 30.0
 _WINDOW_TIMEOUT = 15.0
 _EXIT_TIMEOUT = 10.0
-_REMOVAL_TIMEOUT = 5.0
+# Windows keeps a dead browser's files locked for a moment longer.
+_REMOVAL_TIMEOUT = 15.0 if sys.platform == "win32" else 5.0
 _PAUSE = 0.1
 
 
@@ -61,7 +68,20 @@ SNAP_BROWSERS = {
 }
 _SNAP_LAUNCHERS = ("/snap/bin/", "/usr/bin/snap", "/usr/lib/snapd/")
 BROWSER_ENV = "SHPILOT_BROWSER"
-"""A browser to open the login window in, by name on PATH or by path, instead of the first one found."""
+"""A browser to open the login window in, by name on PATH or by path, instead of the first one found. On Windows,
+by absolute path only."""
+
+# shpilot: where Chromium-family browsers install themselves on Windows, under Program Files, its x86 twin or the
+# user's local AppData: id, name, and the executable under each of those folders.
+_WINDOWS: tuple[tuple[str, str, str], ...] = (
+    ("chrome", "Google Chrome", "Google/Chrome/Application/chrome.exe"),
+    ("edge", "Microsoft Edge", "Microsoft/Edge/Application/msedge.exe"),
+    ("brave", "Brave", "BraveSoftware/Brave-Browser/Application/brave.exe"),
+    ("vivaldi", "Vivaldi", "Vivaldi/Application/vivaldi.exe"),
+    ("chromium", "Chromium", "Chromium/Application/chrome.exe"),
+)
+# The signals that end a program, of those this system has: Windows has no SIGHUP.
+_ENDING = tuple(getattr(signal, name) for name in ("SIGTERM", "SIGHUP") if hasattr(signal, name))
 
 
 def _usable(path: str | None) -> str | None:
@@ -74,10 +94,32 @@ def _usable(path: str | None) -> str | None:
     return path if os.access(path, os.X_OK) else None
 
 
+def window_browsers() -> list[tuple[str, str, str]]:
+    """Return the Chromium-family browsers installed on Windows, as (id, name, executable), each once. Elsewhere,
+    nothing: there the login window takes the first browser `find` finds."""
+    found: list[tuple[str, str, str]] = []
+
+    for browser_id, label, executable in _WINDOWS:
+        for folder in winpaths.install_folders():
+            path = folder / executable
+
+            if path.is_file():
+                found.append((browser_id, label, str(path)))
+                break
+
+    return found
+
+
 def find(environ: Mapping[str, str] = os.environ) -> str | None:
     """Return a Chromium-family browser that can open a window here, or nothing."""
     if sys.platform == "win32":
-        return None
+        # From the folders Windows reports, never PATH, which a caller can point at a planted program.
+        chosen = environ.get(BROWSER_ENV, "").strip()
+
+        if chosen and os.path.isabs(chosen) and os.path.isfile(chosen):
+            return chosen
+
+        return next((path for _, _, path in window_browsers()), None)
 
     chosen = environ.get(BROWSER_ENV, "").strip()
 
@@ -152,6 +194,11 @@ class Capture:
         self._page: str | None = None
         self._handlers: dict[int, Any] = {}
         self._signalled: int | None = None
+        # Windows: the browser's process, and what a thread reads from its pipe, an empty chunk at its end.
+        self._process: subprocess.Popen[bytes] | None = None
+        self._chunks: queue.Queue[bytes] | None = None
+        self._reader: threading.Thread | None = None
+        self._ended = False
 
     def __enter__(self) -> Self:
         try:
@@ -177,7 +224,7 @@ class Capture:
         return _session(result)
 
     def _trap(self) -> None:
-        for signum in (signal.SIGTERM, signal.SIGHUP):
+        for signum in _ENDING:
             handler = signal.getsignal(signum)
 
             # An ignored signal stays ignored, and a handler Python did not set cannot be put back.
@@ -210,7 +257,25 @@ class Capture:
             if signum is not None:
                 signal.raise_signal(signum)
 
+    def _arguments(self, *pipe: str) -> list[str]:
+        assert self._profile is not None
+        return [
+            self._browser,
+            "--remote-debugging-pipe",
+            *pipe,
+            f"--user-data-dir={self._profile}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--password-store=basic",
+            "--disable-sync",
+            _LOGIN_URL,
+        ]
+
     def _launch(self) -> None:
+        if sys.platform == "win32":
+            self._launch_windows()
+            return
+
         import fcntl  # noqa: PLC0415
 
         self._profile = tempfile.mkdtemp(prefix="shpilot-login-")
@@ -226,16 +291,7 @@ class Capture:
         try:
             self._pid = os.posix_spawn(
                 self._browser,
-                [
-                    self._browser,
-                    "--remote-debugging-pipe",
-                    f"--user-data-dir={self._profile}",
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                    "--password-store=basic",
-                    "--disable-sync",
-                    _LOGIN_URL,
-                ],
+                self._arguments(),
                 os.environ,
                 file_actions=[
                     (os.POSIX_SPAWN_OPEN, 0, os.devnull, os.O_RDONLY, 0),
@@ -260,6 +316,62 @@ class Capture:
                 signal.pthread_sigmask(signal.SIG_SETMASK, mask)
 
         raise LoginError(f"The browser could not be launched ({failure}).")
+
+    def _launch_windows(self) -> None:
+        """Launch the browser with two pipe handles it inherits, and no other: the one it reads, then the one it
+        writes. A thread reads what it writes, since Windows cannot wait on a pipe with a timeout."""
+        import msvcrt  # noqa: PLC0415
+
+        self._profile = tempfile.mkdtemp(prefix="shpilot-login-")
+        to_browser, ours_out = os.pipe()
+        ours_in, from_browser = os.pipe()
+        self._fds = [ours_in, ours_out]
+
+        try:
+            handles = [msvcrt.get_osfhandle(fd) for fd in (to_browser, from_browser)]
+
+            for handle in handles:
+                os.set_handle_inheritable(handle, True)
+
+            startup = subprocess.STARTUPINFO()
+            # Only these two, and the standard ones Python adds, reach the browser.
+            startup.lpAttributeList = {"handle_list": handles}
+            self._process = subprocess.Popen(  # noqa: S603
+                self._arguments(f"--remote-debugging-io-pipes={handles[0]},{handles[1]}"),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                startupinfo=startup,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,  # type: ignore[attr-defined]
+            )
+        except OSError as error:
+            failure = type(error).__name__
+        else:
+            self._pid = self._process.pid
+            self._chunks = queue.Queue()
+            self._reader = threading.Thread(target=self._pump, args=(ours_in, self._chunks), daemon=True)
+            self._reader.start()
+            return
+        finally:
+            for fd in (to_browser, from_browser):
+                os.close(fd)
+
+        raise LoginError(f"The browser could not be launched ({failure}).")
+
+    @staticmethod
+    def _pump(fd: int, chunks: "queue.Queue[bytes]") -> None:
+        """Hand on what the browser writes, until its end of the pipe closes: then an empty chunk."""
+        while True:
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                chunk = b""
+
+            chunks.put(chunk)
+
+            if not chunk:
+                return
 
     def _attach(self) -> None:
         # shpilot: a browser can answer before its first window exists (Brave, Chrome for Testing), so it is
@@ -333,6 +445,20 @@ class Capture:
         """Take what the browser wrote, and tell whether there was anything before the deadline."""
         remaining = deadline - time.monotonic()
 
+        if self._chunks is not None:
+            if self._ended or remaining <= 0:
+                return False
+
+            try:
+                chunk = self._chunks.get(timeout=remaining)
+            except queue.Empty:
+                return False
+
+            self._ended = not chunk
+            self._buffer += chunk
+
+            return bool(chunk)
+
         if remaining <= 0 or not self._readable.select(remaining):
             return False
 
@@ -356,9 +482,15 @@ class Capture:
         finally:
             try:
                 self._readable.close()
+                reader, self._reader = self._reader, None
+
+                # The thread reads our end: it is closed once the thread is done with it, or left to the exit.
+                if reader is not None:
+                    reader.join(_EXIT_TIMEOUT)
 
                 for fd in self._fds:
-                    os.close(fd)
+                    if reader is None or not reader.is_alive() or fd != self._fds[0]:
+                        os.close(fd)
             finally:
                 self._fds = []
                 self._buffer = b""
@@ -380,13 +512,40 @@ class Capture:
             while self._read(deadline):
                 self._buffer = b""
         finally:
-            # Its helpers can outlive it, and write to the profile until they end. The browser is
-            # not reaped before this, so its group cannot have become another process's.
-            with suppress(OSError):
-                os.killpg(pid, signal.SIGKILL)
+            if self._process is not None:
+                self._kill_tree(self._process)
+            else:
+                # Its helpers can outlive it, and write to the profile until they end. The browser is
+                # not reaped before this, so its group cannot have become another process's.
+                with suppress(OSError):
+                    os.killpg(pid, signal.SIGKILL)
 
-            with suppress(ChildProcessError):
-                os.waitpid(pid, 0)
+                with suppress(ChildProcessError):
+                    os.waitpid(pid, 0)
+
+    def _kill_tree(self, process: "subprocess.Popen[bytes]") -> None:
+        """Windows: end the browser and every process it started, which can hold the profile open."""
+        self._process = None
+        system = winpaths.system_directory()
+
+        try:
+            # Not yet waited for, so its id cannot have become another process's.
+            if system is not None:
+                with suppress(OSError, subprocess.SubprocessError):
+                    subprocess.run(  # noqa: S603
+                        [str(system / "taskkill.exe"), "/PID", str(process.pid), "/T", "/F"],
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=_EXIT_TIMEOUT,
+                        check=False,
+                    )
+
+            with suppress(OSError):
+                process.kill()
+        finally:
+            with suppress(subprocess.TimeoutExpired):
+                process.wait(_EXIT_TIMEOUT)
 
 
 def _remove(profile: str) -> bool:

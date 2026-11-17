@@ -153,8 +153,9 @@ def test_is_exported_and_documented(name):
 
 
 def test_takes_callbacks_and_a_timeout_and_nothing_to_point_it_elsewhere():
-    # `use` names a browser to read the login from and `paste` skips the window: neither points elsewhere.
-    assert set(inspect.signature(login).parameters) == {"ask", "notify", "timeout", "use", "paste"}
+    # `use` names a browser to read the login from, `paste` skips the window and `window` names an installed browser
+    # to open it in: none points elsewhere.
+    assert set(inspect.signature(login).parameters) == {"ask", "notify", "timeout", "use", "paste", "window"}
 
 
 def test_a_browser_login_stores_the_session(backend, upstream, browser, frontend):
@@ -419,3 +420,36 @@ def test_paste_asks_without_opening_a_window(backend, upstream, browser, fronten
     assert stored(backend) == [SESSION]
     assert browser.launched == []
     assert frontend.steps == [LoginStep.KEYRING, LoginStep.PASTE]
+
+
+EDGE = "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"
+
+
+@pytest.fixture
+def installed(monkeypatch):
+    found = [("chrome", "Google Chrome", BROWSER), ("edge", "Microsoft Edge", EDGE)]
+    monkeypatch.setattr(_login, "_window_browsers", lambda: found)
+
+    return found
+
+
+def test_a_window_opens_in_the_installed_browser_picked(backend, upstream, browser, installed, frontend):
+    browser.cookies = [None, SESSION]
+
+    login(ask=frontend.ask, notify=frontend.steps.append, window="edge")
+
+    assert stored(backend) == [SESSION]
+    assert browser.launched == [EDGE]
+    assert frontend.steps == [LoginStep.KEYRING, LoginStep.BROWSER]
+
+
+@pytest.mark.parametrize("browser_id", ["opera", "firefox", "C:/Windows/System32/cmd.exe", ""])
+def test_a_window_opens_only_in_a_browser_installed_where_windows_says(
+    backend, upstream, browser, installed, frontend, browser_id, previous
+):
+    with pytest.raises(LoginError, match="installed"):
+        login(ask=frontend.ask, notify=frontend.steps.append, window=browser_id)
+
+    assert browser.launched == []
+    assert frontend.asked == 0
+    assert backend.entries[KEY] == previous

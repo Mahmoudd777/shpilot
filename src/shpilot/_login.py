@@ -7,7 +7,7 @@ from enum import Enum
 
 from shpilot import _cookies
 from shpilot._session import SessionStore
-from shpilot._upstream.browser import Capture, find
+from shpilot._upstream.browser import Capture, find, window_browsers
 from shpilot._upstream.projects import PATH as _PROJECTS
 from shpilot._upstream.transport import Transport, is_sendable
 from shpilot.errors import LoginError, LoginTimeoutError, SessionExpiredError
@@ -20,6 +20,7 @@ _logger = logging.getLogger("shpilot")
 
 # What the tests replace: the browser, the connection to Odoo.sh and the time.
 _find = find
+_window_browsers = window_browsers
 _capture = Capture
 _transport: Callable[[Secret], Transport] = Transport
 _monotonic = time.monotonic
@@ -49,6 +50,7 @@ def login(
     timeout: float = 300,
     use: str | None = None,
     paste: bool = False,
+    window: str | None = None,
 ) -> None:
     """Log in to Odoo.sh and store the session in the keyring, replacing the stored one.
 
@@ -65,7 +67,9 @@ def login(
 
     With `use`, the id of a browser from `browsers()` the user picked, the session is instead the
     one that browser already holds: its `session_id` cookie of www.odoo.sh, and nothing else, is
-    read and checked, and no window opens. With `paste`, no window opens and `ask` is called.
+    read and checked, and no window opens. With `paste`, no window opens and `ask` is called. With `window`, the id
+    of a browser from `window_browsers()` (Windows only), the window opens in that one rather than the first one
+    found; `LoginError` when it is not installed.
     """
     store = SessionStore()
     notify(LoginStep.KEYRING)
@@ -74,11 +78,21 @@ def login(
     if use is not None:
         session = _reused(use, notify)
     else:
-        browser = None if paste else _find()
+        browser = None if paste else _installed(window) if window is not None else _find()
         session = _pasted(ask, notify) if browser is None else _captured(browser, notify, timeout)
 
     store.save(session, timeout)
     _logger.debug("login: session stored")
+
+
+def _installed(browser_id: str) -> str:
+    """The executable of a browser `window_browsers()` lists: only these, from the folders Windows reports."""
+    path = next((path for found, _, path in _window_browsers() if found == browser_id), None)
+
+    if path is None:
+        raise LoginError(f"No {browser_id} browser to open the sign-in window in is installed here.")
+
+    return path
 
 
 def _captured(browser: str, notify: Callable[[LoginStep], None], timeout: float) -> Secret:

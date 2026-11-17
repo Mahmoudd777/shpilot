@@ -40,8 +40,9 @@ guard's file; a backup is kept).
      GitHub there within 5 minutes.
    - `--paste` needs a terminal: start `shpilot auth login --paste` in the user's terminal panel and let
      them paste the `session_id` cookie themselves. Never ask them to paste it to you.
-   - On Windows only `--from firefox` and `--paste` exist (no `--window`; Chromium browsers there
-     cannot be read).
+   - On Windows, `--from firefox` reuses Firefox's login; `--from chrome|edge|brave|vivaldi|chromium`
+     opens a fresh sign-in window in that browser (Windows locks their own logins to them), so the
+     user signs in to GitHub there within 5 minutes. `auth browsers` marks these `opens_window`.
 
 `Odoo.sh no longer accepts the login <browser> holds` → the user logs in to www.odoo.sh in that
 browser again, or picks another way.

@@ -1,6 +1,6 @@
 {
   "name": "shpilot",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Odoo.sh for Claude Code: builds, live logs, backups and SSH from the terminal, with a production guard that waits for a person.",
   "author": {
     "name": "Mahmoud Shrief, Global Solutions"

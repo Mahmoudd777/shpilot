@@ -1,5 +1,8 @@
 """Stands in for a Chromium browser: answers on the debugging pipe and records what it is sent.
 
+The pipe is file descriptors 3 and 4, or on Windows the two handles `--remote-debugging-io-pipes` names: the one it
+reads, then the one it writes.
+
 `FAKE_BROWSER_LOG` is where the record goes, one JSON document per line. `FAKE_BROWSER_COOKIES`
 holds the cookies of each `Network.getCookies` answer in turn, the last one repeating.
 `FAKE_BROWSER_MODE` changes one behaviour: `no-page`, `closed`, `hangs`, `helper` or `elsewhere`.
@@ -15,6 +18,18 @@ from pathlib import Path
 LOG = Path(os.environ["FAKE_BROWSER_LOG"])
 COOKIES = json.loads(os.environ.get("FAKE_BROWSER_COOKIES", "[[]]"))
 MODE = os.environ.get("FAKE_BROWSER_MODE", "")
+def pipe():
+    for arg in sys.argv:
+        if arg.startswith("--remote-debugging-io-pipes="):
+            import msvcrt
+
+            read, write = (int(handle) for handle in arg.partition("=")[2].split(","))
+            return msvcrt.open_osfhandle(read, os.O_RDONLY), msvcrt.open_osfhandle(write, os.O_WRONLY)
+
+    return 3, 4
+
+
+READ, WRITE = pipe()
 TARGETS = [{"targetId": "browser-1", "type": "browser"}, "not a target", {"targetId": "page-1", "type": "page"}]
 
 
@@ -27,7 +42,7 @@ ASKED: list[str] = []
 
 
 def write(message):
-    os.write(4, (message if isinstance(message, bytes) else json.dumps(message).encode()) + b"\0")
+    os.write(WRITE, (message if isinstance(message, bytes) else json.dumps(message).encode()) + b"\0")
 
 
 def answer(message):
@@ -80,10 +95,10 @@ def main():
         return
 
     launch = {"argv": sys.argv[1:], "pid": os.getpid(), "helper": helper}
-    record({**launch, "stdio": [os.fstat(fd).st_rdev for fd in (0, 1, 2)]})
+    record({**launch, "stdio": [os.fstat(fd).st_rdev for fd in (0, 1, 2)] if os.name == "posix" else []})
     buffer = b""
 
-    while chunk := os.read(3, 65536):
+    while chunk := os.read(READ, 65536):
         buffer += chunk
 
         while b"\0" in buffer:

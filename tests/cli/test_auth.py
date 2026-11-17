@@ -355,3 +355,73 @@ def test_browsers_lists_the_ways_without_reading_a_cookie(monkeypatch: pytest.Mo
     result = run("--format", "json", "auth", "browsers")
 
     assert [json.loads(line)["id"] for line in result.stdout.splitlines()] == ["brave", "window", "paste"]
+
+
+WINDOWS_BROWSERS = [
+    ("chrome", "Google Chrome", "C:/Program Files/Google/Chrome/Application/chrome.exe"),
+    ("edge", "Microsoft Edge", "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"),
+]
+
+
+@pytest.fixture
+def on_windows(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(auth.sys, "platform", "win32")
+    monkeypatch.setattr(shpilot, "window_browsers", lambda: WINDOWS_BROWSERS)
+    monkeypatch.setattr(shpilot, "browsers", lambda: [shpilot.BrowserLogin("firefox", "Firefox", signed_in=True)])
+
+
+def test_on_windows_each_installed_browser_is_a_way_that_opens_a_window(on_windows: None):
+    result = run("--format", "json", "auth", "browsers")
+    ways = [json.loads(line) for line in result.stdout.splitlines()]
+
+    assert [(way["id"], way["opens_window"]) for way in ways] == [
+        ("firefox", False),
+        ("chrome", True),
+        ("edge", True),
+        ("paste", False),
+    ]
+
+
+def test_on_windows_the_picker_says_which_browsers_open_a_window(on_windows: None):
+    result = run("auth", "browsers")
+
+    assert "edge      Microsoft Edge, opens a sign-in window in it" in result.stdout
+    assert "firefox   Firefox, holds an Odoo.sh login" in result.stdout
+
+
+def test_on_windows_from_a_chromium_browser_opens_a_window_in_it(
+    monkeypatch: pytest.MonkeyPatch, on_windows: None, client: type[StubClient]
+):
+    called: list[dict[str, object]] = []
+
+    def login(*, notify: Callable[[shpilot.LoginStep], None], **given: object) -> None:
+        called.append(given)
+        notify(shpilot.LoginStep.BROWSER)
+
+    monkeypatch.setattr(shpilot, "login", login)
+
+    result = run("auth", "login", "--from", "edge")
+
+    assert result.exit_code == 0, result.output
+    assert [(given.get("window"), given.get("use")) for given in called] == [("edge", None)]
+    assert "sign in to Odoo.sh with GitHub there" in result.stderr
+
+
+def test_on_windows_firefox_is_still_reused(monkeypatch: pytest.MonkeyPatch, on_windows: None, client: type[StubClient]):
+    called: list[dict[str, object]] = []
+    monkeypatch.setattr(shpilot, "login", lambda **given: called.append(given))
+
+    assert run("auth", "login", "--from", "firefox").exit_code == 0
+    assert [(given.get("window"), given.get("use")) for given in called] == [(None, "firefox")]
+
+
+def test_on_windows_a_browser_that_is_not_installed_is_refused(monkeypatch: pytest.MonkeyPatch, on_windows: None):
+    called: list[object] = []
+    monkeypatch.setattr(shpilot, "login", lambda **given: called.append(given))
+
+    result = run("auth", "login", "--from", "brave")
+    words = " ".join(click.unstyle(result.output).replace("│", " ").split())
+
+    assert result.exit_code == 2
+    assert "brave is not installed here. Browsers here: firefox, chrome, edge." in words
+    assert called == []

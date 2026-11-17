@@ -5,6 +5,7 @@ from importlib.metadata import version
 from shpilot._client import Client
 from shpilot._cookies import BrowserLogin, browsers
 from shpilot._login import LoginStep, login
+from shpilot._upstream.browser import window_browsers
 from shpilot._logout import logout
 from shpilot._session import KEYRING_ENTRY, KEYRING_SERVICE, SESSION_ENV
 from shpilot._text import strip_line_control
@@ -164,6 +165,7 @@ __all__ = [
     "login",
     "logout",
     "strip_line_control",
+    "window_browsers",
 ]
 
 __version__ = version("shpilot")

@@ -243,8 +243,8 @@ They sit in front of the guard and do not replace it.
 | The `shpilot` command, every read and change | yes | yes | yes |
 | Production guard | desktop dialog (zenity, kdialog), else terminal | desktop dialog (osascript), else terminal | Windows dialog (Windows PowerShell), else console |
 | Guard's "Always" kept in | `~/.config/shpilot/` | `~/Library/Application Support/shpilot/` | the AppData folder Windows reports |
-| Log in `--from` a browser | Firefox, Chrome, Chromium, Brave, Edge, Vivaldi, Opera (snaps too) | the same | Firefox only (Chromium binds its key to the browser on Windows) |
-| Log in `--window` | yes | yes | no: use `--from firefox` or `--paste` |
+| Log in `--from` a browser | Firefox, Chrome, Chromium, Brave, Edge, Vivaldi, Opera (snaps too) | the same | Firefox reused; Chrome, Edge, Brave, Vivaldi, Chromium open a sign-in window in that browser (Windows binds their cookies to the browser) |
+| Log in `--window` | yes | yes | yes, in the first of those installed |
 | Session kept in | Secret Service (GNOME Keyring, KWallet) | Keychain | Credential Locker |
 | `shpilot ssh`, `backups pull` | hands over to `ssh` | hands over to `ssh` | prints the `ssh` command to run (exit 14) |
 | `web-session`, `browse.sh` (browser tests) | yes | yes | in WSL (they need the `ssh` handover) |

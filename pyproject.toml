@@ -1,6 +1,6 @@
 [project]
 name = "shpilot"
-version = "0.1.0"
+version = "0.1.1"
 description = "Odoo.sh from the terminal and from AI coding agents: builds, logs, backups, SSH, with a production guard. Based on odouche."
 readme = "README.md"
 license = "MIT"

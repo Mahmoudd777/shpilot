@@ -7,8 +7,8 @@ import pytest
 
 
 if sys.platform == "win32":
-    # The login window speaks to the browser over inherited file descriptors 3 and 4 (posix_spawn): it is POSIX
-    # only, and on Windows the login offers --from firefox and --paste instead.
+    # These launch over inherited file descriptors 3 and 4 (posix_spawn). Windows passes two pipe handles
+    # instead: test_browser_windows.py.
     pytest.skip("The login window is POSIX only.", allow_module_level=True)
 
 import resource  # noqa: E402
@@ -422,7 +422,6 @@ def test_takes_no_other_cookie_for_the_session(result):
         ("linux", {}, ["/usr/bin/chromium"], None),
         ("darwin", {}, [browser._APPLICATIONS[2]], browser._APPLICATIONS[2]),
         ("darwin", {}, ["/Applications/Firefox.app/Contents/MacOS/firefox"], None),
-        ("win32", {"DISPLAY": ":0"}, ["/usr/bin/chromium", browser._APPLICATIONS[0]], None),
     ],
 )
 def test_finds_a_chromium_browser_that_can_open_a_window(monkeypatch, platform, environ, installed, found):
@@ -431,3 +430,48 @@ def test_finds_a_chromium_browser_that_can_open_a_window(monkeypatch, platform, 
     monkeypatch.setattr(os, "access", lambda path, _: path in installed)
 
     assert find(environ) == found
+
+
+EDGE = ("edge", "Microsoft Edge", "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
+CHROME = ("chrome", "Google Chrome", "C:/Program Files/Google/Chrome/Application/chrome.exe")
+
+
+@pytest.mark.parametrize(
+    ("environ", "installed", "files", "found"),
+    [
+        ({}, [CHROME, EDGE], [], CHROME[2]),
+        ({}, [EDGE], [], EDGE[2]),
+        ({}, [], [], None),
+        # Neither PATH nor DISPLAY counts on Windows.
+        ({"DISPLAY": ":0"}, [], ["/usr/bin/chromium"], None),
+        ({browser.BROWSER_ENV: "/opt/chosen/browser.exe"}, [CHROME], ["/opt/chosen/browser.exe"], "/opt/chosen/browser.exe"),
+        # A name is looked up on PATH, which a caller can point anywhere: only an absolute path is taken.
+        ({browser.BROWSER_ENV: "chosen.exe"}, [CHROME], ["chosen.exe"], CHROME[2]),
+        ({browser.BROWSER_ENV: "/opt/missing.exe"}, [EDGE], [], EDGE[2]),
+    ],
+)
+def test_finds_an_installed_browser_on_windows(monkeypatch, environ, installed, files, found):
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(browser, "window_browsers", lambda: installed)
+    monkeypatch.setattr(shutil, "which", lambda name: next((p for p in files if p.endswith(name)), None))
+    monkeypatch.setattr(os.path, "isfile", lambda path: path in files)
+
+    assert find(environ) == found
+
+
+def test_lists_the_browsers_installed_on_windows_once_each(monkeypatch, tmp_path):
+    program_files, local = tmp_path / "Program Files", tmp_path / "Local"
+    for folder, executable in (
+        (program_files, "Google/Chrome/Application/chrome.exe"),
+        (local, "Google/Chrome/Application/chrome.exe"),
+        (local, "BraveSoftware/Brave-Browser/Application/brave.exe"),
+        (program_files, "Mozilla Firefox/firefox.exe"),
+    ):
+        (folder / executable).parent.mkdir(parents=True, exist_ok=True)
+        (folder / executable).write_text("")
+    monkeypatch.setattr(browser.winpaths, "install_folders", lambda: (program_files, local))
+
+    assert browser.window_browsers() == [
+        ("chrome", "Google Chrome", str(program_files / "Google/Chrome/Application/chrome.exe")),
+        ("brave", "Brave", str(local / "BraveSoftware/Brave-Browser/Application/brave.exe")),
+    ]

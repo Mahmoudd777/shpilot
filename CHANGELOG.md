@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.1
+
+### Changed
+
+- **Log in on Windows with any browser.** `shpilot auth login` on Windows now lists the Chromium-family
+  browsers installed (Chrome, Edge, Brave, Vivaldi, Chromium), found in the folders Windows reports.
+  Picking one opens a sign-in window in it, with a fresh profile deleted after, as `--window` does on
+  Linux and macOS. Their existing logins are still not read: Windows binds them to the browser.
+  Firefox's login is reused as before. `--window` works on Windows too.
+- The browser is spoken to over two inherited pipe handles (`--remote-debugging-io-pipes`), never a
+  network port, and is ended with every process it started (`taskkill /T`).
+- `shpilot auth browsers --format json` gives each way an `opens_window` field.
+- `shpilot.login()` takes `window=<id>`, an id from the new `shpilot.window_browsers()`.
+
 ## 0.1.0 (first release)
 
 The first release of shpilot, based on [odouche](https://github.com/avanserv/odouche) 0.8.1 by
