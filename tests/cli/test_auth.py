@@ -316,6 +316,7 @@ def test_help_opens_neither_the_keyring_nor_the_network(client: type[StubClient]
 
 
 def test_login_without_a_way_and_without_a_terminal_lists_the_choices(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(auth.sys, "platform", "linux")
     monkeypatch.setattr(shpilot, "browsers", lambda: [shpilot.BrowserLogin("firefox", "Firefox", signed_in=True)])
     asked = log_in(monkeypatch)
 
@@ -337,6 +338,8 @@ def test_login_from_a_browser_reads_that_browser_only(monkeypatch: pytest.Monkey
         notify(shpilot.LoginStep.REUSE)
 
     monkeypatch.setattr(shpilot, "login", login)
+    # Elsewhere than on Windows, where Brave opens a window instead.
+    monkeypatch.setattr(auth.sys, "platform", "linux")
 
     result = run("auth", "login", "--from", "brave")
 
@@ -350,6 +353,7 @@ def test_login_takes_one_way_only():
 
 
 def test_browsers_lists_the_ways_without_reading_a_cookie(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(auth.sys, "platform", "linux")
     monkeypatch.setattr(shpilot, "browsers", lambda: [shpilot.BrowserLogin("brave", "Brave", signed_in=False)])
 
     result = run("--format", "json", "auth", "browsers")

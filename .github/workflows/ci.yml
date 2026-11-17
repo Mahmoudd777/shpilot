@@ -29,7 +29,7 @@ jobs:
       - name: Install
         run: uv sync --locked
       - name: Test suite
-        run: uv run pytest
+        run: uv run pytest -rs
         env:
           # Windows runners have Edge and Chrome: open the sign-in window in each, for real.
           SHPILOT_REAL_BROWSER: ${{ matrix.os == 'windows-latest' && '1' || '' }}
